@@ -1,0 +1,129 @@
+// =============================================================================
+// Azure Sentinel — SOC & Honeynet KQL Queries
+// Author: Nathaniel Osei-Baffour
+//
+// Description:
+//   KQL (Kusto Query Language) queries used in the Azure Sentinel SOC & Honeynet
+//   project. These queries power the attack map workbook, generate alerts, and
+//   surface threat intelligence from enriched failed RDP log data.
+// =============================================================================
+
+
+// ── 1. ATTACK MAP QUERY ───────────────────────────────────────────────────────
+// Used in the Sentinel Workbook to plot attacker origins on a world map.
+// Reads from the custom log ingested from the honeypot VM.
+
+FAILED_RDP_WITH_GEO_CL
+| extend
+    latitude    = toreal(extract("latitude=([^,]+)",  1, RawData)),
+    longitude   = toreal(extract("longitude=([^,]+)", 1, RawData)),
+    sourcehost  = extract("sourcehost=([^,]+)",       1, RawData),
+    username    = extract("username=([^,]+)",          1, RawData),
+    country     = extract("country=([^,]+)",           1, RawData),
+    state       = extract("state=([^,]+)",             1, RawData),
+    label       = extract("label=([^,]+)",             1, RawData)
+| where sourcehost != "samplehost"                   // filter out placeholder row
+| where isnotempty(latitude) and isnotempty(longitude)
+| summarize
+    event_count = count(),
+    last_seen   = max(TimeGenerated)
+    by sourcehost, username, country, state, label, latitude, longitude
+| project
+    sourcehost, username, country, state, label,
+    latitude, longitude, event_count, last_seen
+
+
+// ── 2. TOP ATTACKING COUNTRIES ────────────────────────────────────────────────
+// Ranks countries by number of failed login attempts.
+
+FAILED_RDP_WITH_GEO_CL
+| extend country = extract("country=([^,]+)", 1, RawData)
+| where country != "samplenation"
+| summarize attack_count = count() by country
+| sort by attack_count desc
+| take 15
+
+
+// ── 3. TOP TARGETED USERNAMES ─────────────────────────────────────────────────
+// Shows which usernames attackers are attempting most frequently.
+// Useful for understanding brute-force patterns.
+
+FAILED_RDP_WITH_GEO_CL
+| extend username = extract("username=([^,]+)", 1, RawData)
+| where username != "sampleuser" and isnotempty(username)
+| summarize attempt_count = count() by username
+| sort by attempt_count desc
+| take 20
+
+
+// ── 4. ATTACK VOLUME OVER TIME ────────────────────────────────────────────────
+// Time chart showing attack frequency — useful for identifying spikes.
+
+FAILED_RDP_WITH_GEO_CL
+| extend sourcehost = extract("sourcehost=([^,]+)", 1, RawData)
+| where sourcehost != "samplehost"
+| summarize attacks = count() by bin(TimeGenerated, 1h)
+| render timechart
+
+
+// ── 5. UNIQUE ATTACKING IPs PER COUNTRY ──────────────────────────────────────
+// Shows how many distinct IPs are attacking from each country.
+
+FAILED_RDP_WITH_GEO_CL
+| extend
+    country    = extract("country=([^,]+)",    1, RawData),
+    sourcehost = extract("sourcehost=([^,]+)", 1, RawData)
+| where country != "samplenation"
+| summarize
+    unique_ips    = dcount(sourcehost),
+    total_attacks = count()
+    by country
+| sort by total_attacks desc
+
+
+// ── 6. RECENT FAILED LOGINS — LAST 24 HOURS ───────────────────────────────────
+// Quick view of all failed login attempts in the last 24 hours.
+
+FAILED_RDP_WITH_GEO_CL
+| extend
+    sourcehost = extract("sourcehost=([^,]+)", 1, RawData),
+    username   = extract("username=([^,]+)",   1, RawData),
+    country    = extract("country=([^,]+)",    1, RawData),
+    state      = extract("state=([^,]+)",      1, RawData)
+| where TimeGenerated > ago(24h)
+| where sourcehost != "samplehost"
+| project TimeGenerated, sourcehost, username, country, state
+| sort by TimeGenerated desc
+
+
+// ── 7. ALERT RULE — HIGH VOLUME BRUTE FORCE ──────────────────────────────────
+// Fires an alert when a single IP exceeds 50 failed attempts within 10 minutes.
+// Use this as a Scheduled Alert Rule in Microsoft Sentinel.
+
+FAILED_RDP_WITH_GEO_CL
+| extend
+    sourcehost = extract("sourcehost=([^,]+)", 1, RawData),
+    country    = extract("country=([^,]+)",    1, RawData)
+| where sourcehost != "samplehost"
+| where TimeGenerated > ago(10m)
+| summarize
+    attempt_count = count(),
+    country       = any(country)
+    by sourcehost
+| where attempt_count > 50
+| project sourcehost, attempt_count, country
+| extend AlertSeverity = "High", AlertDescription = strcat("Brute force detected from ", sourcehost, " (", country, ") — ", attempt_count, " attempts in 10 min")
+
+
+// ── 8. GEOLOCATION HEATMAP DATA ──────────────────────────────────────────────
+// Aggregated coordinates for rendering a density heatmap in the workbook.
+
+FAILED_RDP_WITH_GEO_CL
+| extend
+    latitude   = toreal(extract("latitude=([^,]+)",  1, RawData)),
+    longitude  = toreal(extract("longitude=([^,]+)", 1, RawData)),
+    country    = extract("country=([^,]+)",           1, RawData)
+| where country != "samplenation"
+| where isnotempty(latitude) and isnotempty(longitude)
+| summarize weight = count() by latitude, longitude, country
+| project latitude, longitude, country, weight
